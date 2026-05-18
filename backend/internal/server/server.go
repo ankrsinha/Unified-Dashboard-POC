@@ -18,7 +18,7 @@ func New(cfg config.Config, h *handler.Handler) http.Handler {
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
-	r.Use(middleware.Timeout(60 * time.Second))
+	r.Use(middleware.Timeout(180 * time.Second))
 	r.Use(slogMiddleware)
 
 	r.Use(cors.Handler(cors.Options{
@@ -41,6 +41,7 @@ func New(cfg config.Config, h *handler.Handler) http.Handler {
 		r.Get("/repositories/{owner}/{name}/tracking", h.RepoTracking)
 		r.Get("/repositories/{owner}/{name}/insights", h.RepoInsights)
 		r.Get("/tracking/summary", h.TrackingSummary)
+		r.Get("/tracking/trends", h.TrackingTrends)
 	})
 
 	return r

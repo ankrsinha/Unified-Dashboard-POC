@@ -52,6 +52,20 @@ func GetOrFetch[T any](c *Cache, key string, fetch func() (T, error)) (v T, hit 
 	return v, false, nil
 }
 
+// Get returns a cached value if present and not expired.
+func Get[T any](c *Cache, key string) (T, bool) {
+	var zero T
+	raw, ok := c.getBytes(key)
+	if !ok {
+		return zero, false
+	}
+	if err := json.Unmarshal(raw, &zero); err != nil {
+		c.Delete(key)
+		return zero, false
+	}
+	return zero, true
+}
+
 func (c *Cache) getBytes(key string) ([]byte, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

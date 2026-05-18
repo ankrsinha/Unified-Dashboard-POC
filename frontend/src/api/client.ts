@@ -10,7 +10,23 @@ export interface Repository {
   open_issues_count: number;
   open_pull_requests_count?: number;
   archived: boolean;
+  created_at?: string;
   updated_at?: string;
+}
+
+export interface TrendPoint {
+  month: string;
+  repos: number;
+  stars: number;
+  open_prs: number;
+  open_issues: number;
+}
+
+export interface TrackingTrendsResponse {
+  organization: string;
+  points: TrendPoint[] | null;
+  partial?: boolean;
+  message?: string;
 }
 
 export interface Issue {
@@ -131,6 +147,20 @@ async function getJSON<T>(path: string, options?: FetchOptions): Promise<FetchRe
 export async function fetchRepositories(options?: FetchOptions) {
   const { data } = await getJSON<RepositoriesResponse>("/api/repositories", options);
   return data;
+}
+
+function normalizeTrendPoints(points: TrendPoint[] | null | undefined): TrendPoint[] {
+  return Array.isArray(points) ? points : [];
+}
+
+export async function fetchTrackingTrends(options?: FetchOptions) {
+  const { data } = await getJSON<TrackingTrendsResponse>("/api/tracking/trends", options);
+  return {
+    organization: data.organization,
+    points: normalizeTrendPoints(data.points),
+    partial: Boolean(data.partial),
+    message: data.message,
+  };
 }
 
 export async function fetchTrackingSummary(options?: FetchOptions) {

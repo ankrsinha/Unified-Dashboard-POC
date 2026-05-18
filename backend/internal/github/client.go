@@ -26,6 +26,7 @@ type Repository struct {
 	OpenPullRequests  int `json:"open_pull_requests_count"`
 	Private           bool   `json:"private"`
 	Archived    bool   `json:"archived"`
+	CreatedAt   string `json:"created_at,omitempty"`
 	UpdatedAt   string `json:"updated_at,omitempty"`
 }
 
@@ -130,6 +131,9 @@ func mapRepository(r *gh.Repository) Repository {
 		OpenIssues:  r.GetOpenIssuesCount(),
 		Private:     r.GetPrivate(),
 		Archived:    r.GetArchived(),
+	}
+	if r.CreatedAt != nil {
+		repo.CreatedAt = r.CreatedAt.Format(time.RFC3339)
 	}
 	if r.UpdatedAt != nil {
 		repo.UpdatedAt = r.UpdatedAt.Format(time.RFC3339)

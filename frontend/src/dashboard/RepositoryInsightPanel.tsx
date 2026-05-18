@@ -26,6 +26,8 @@ import {
   type Repository,
 } from "../api/client";
 import { InsightsLoading } from "./InsightsLoading";
+import { describeLatestMonthTrend } from "./statTrendUtils";
+import { TrendInsightBanner } from "./TrendInsightBanner";
 
 const CHART_COLORS = ["#1976d2", "#d32f2f", "#ed6c02", "#2e7d32", "#9c27b0"];
 const LOADING_DELAY_MS = 150;
@@ -40,6 +42,12 @@ function formatMonthLabel(yearMonth: string): string {
     month: "long",
     year: "numeric",
   });
+}
+
+function trendItemLabel(categoryKey: string): string {
+  if (categoryKey === "pending_prs") return "pull requests opened";
+  if (categoryKey === "dependency_alerts") return "alerts";
+  return "issues opened";
 }
 
 function monthRangeLabel(months: string[]): string | null {
@@ -218,7 +226,9 @@ export function RepositoryInsightPanel({ repo, refreshTrigger, onClose }: Reposi
   const monthLabels = months.map(formatMonthLabel);
   const monthRange = monthRangeLabel(months);
   const counts = selected.monthly.map(m => m.count);
-  const selectedBarColor = pieData.find(d => d.id === selectedKey)?.color ?? CHART_COLORS[0];
+  const monthTrend = describeLatestMonthTrend(counts, monthLabels, trendItemLabel(selectedKey));
+  const selectedBarColor =
+    pieData.find(d => d.id === selectedKey)?.color ?? CHART_COLORS[0] ?? "#1976d2";
 
   return (
     <Fade in timeout={400}>
@@ -261,17 +271,32 @@ export function RepositoryInsightPanel({ repo, refreshTrigger, onClose }: Reposi
               {selected.label} opened by month
             </Typography>
             {monthRange && (
-              <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.5 }}>
+              <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1 }}>
                 {monthRange} · by GitHub creation date (open items only)
               </Typography>
             )}
+            {monthTrend && <TrendInsightBanner insight={monthTrend} color={selectedBarColor} />}
             {months.length > 0 ? (
-              <BarChart
-                xAxis={[{ scaleType: "band", data: monthLabels }]}
-                series={[{ data: counts, label: selected.label, color: selectedBarColor }]}
-                height={220}
-                margin={{ left: 40, right: 12, top: 12, bottom: 48 }}
-              />
+              <>
+                <BarChart
+                  xAxis={[{ scaleType: "band", data: monthLabels }]}
+                  series={[
+                    {
+                      data: counts,
+                      label: selected.label,
+                      color: selectedBarColor,
+                      barLabel: "value",
+                      barLabelPlacement: "outside",
+                    },
+                  ]}
+                  height={220}
+                  margin={{ left: 40, right: 12, top: 20, bottom: 48 }}
+                />
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>
+                  Each bar is how many were opened that month. Numbers on bars are counts. Compare
+                  heights month to month — the banner above explains the latest change.
+                </Typography>
+              </>
             ) : (
               <Typography variant="body2" color="text.secondary">
                 No dated items for this category.
