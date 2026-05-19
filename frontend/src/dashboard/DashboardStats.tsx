@@ -11,6 +11,7 @@ import Box from "@mui/material/Box";
 import Card from "@mui/material/Card";
 import CardContent from "@mui/material/CardContent";
 import Chip from "@mui/material/Chip";
+import CircularProgress from "@mui/material/CircularProgress";
 import Collapse from "@mui/material/Collapse";
 import Grid from "@mui/material/Grid";
 import IconButton from "@mui/material/IconButton";
@@ -20,7 +21,7 @@ import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import { alpha, useTheme, type Theme } from "@mui/material/styles";
 import { LineChart } from "@mui/x-charts/LineChart";
-import { useMemo, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
 import type { Repository, TrendPoint } from "../api/client";
 import { useStatCardsPreferences } from "../theme/StatCardsPreferencesContext";
 import { buildYearlyTrendsFromRepos } from "./buildTrendsFromRepos";
@@ -32,6 +33,7 @@ import {
   type TrendDirection,
   type TrendMetricKey,
 } from "./statTrendUtils";
+import { StatTrendDetailDialog, type StatTrendDetailProps } from "./StatTrendDetailDialog";
 import { useAnimatedCount } from "./useAnimatedCount";
 
 type TrendGranularity = "month" | "year";
@@ -44,7 +46,9 @@ type DashboardStatsProps = {
   repositories: Repository[];
   organization: string;
   trendPoints?: TrendPoint[];
-  trendsLoading?: boolean;
+  /** Repo list still loading — headline values and yearly charts. */
+  reposPending?: boolean;
+  trendsPending?: boolean;
   trendsWarning?: string | null;
 };
 
@@ -62,10 +66,15 @@ function statCardSx(theme: Theme, paletteKey: PaletteKey) {
   const color = theme.palette[paletteKey].main;
   return {
     height: "100%",
-    cursor: "default",
+    cursor: "pointer",
     userSelect: "none",
     borderColor: alpha(color, theme.palette.mode === "light" ? 0.28 : 0.4),
     background: theme.palette.background.paper,
+    transition: "box-shadow 0.2s, border-color 0.2s",
+    "&:hover": {
+      borderColor: color,
+      boxShadow: `0 4px 20px ${alpha(color, 0.18)}`,
+    },
   };
 }
 
@@ -128,14 +137,14 @@ function StatTrendChart({
   data,
   monthLabels,
   color,
-  loading,
+  isPending,
 }: {
   data: number[];
   monthLabels: string[];
   color: string;
-  loading: boolean;
+  isPending: boolean;
 }) {
-  if (loading) {
+  if (isPending) {
     return <Skeleton variant="rounded" height={CHART_HEIGHT} sx={{ mt: 1.5, borderRadius: 1.5 }} />;
   }
 
@@ -206,15 +215,15 @@ function StatTrendBadge({
   direction,
   label,
   summary,
-  loading,
+  isPending,
 }: {
   direction: TrendDirection;
   label: string;
   summary: string;
-  loading: boolean;
+  isPending: boolean;
 }) {
   const theme = useTheme();
-  if (loading) {
+  if (isPending) {
     return <Skeleton width={72} height={24} sx={{ mt: 0.75 }} />;
   }
 
@@ -249,11 +258,17 @@ function StatCard({
   trendKey,
   chartPoints,
   granularity,
-  trendsLoading,
+  valuePending,
+  chartPending,
+  trendsPending,
+  onOpenDetail,
 }: StatDef & {
   chartPoints: TrendPoint[];
   granularity: TrendGranularity;
-  trendsLoading: boolean;
+  valuePending: boolean;
+  chartPending: boolean;
+  trendsPending: boolean;
+  onOpenDetail: (color: string) => void;
 }) {
   const theme = useTheme();
   const color = theme.palette[paletteKey].main;
@@ -265,7 +280,20 @@ function StatCard({
       : describeLatestMonthTrend(series, periodLabels, statTrendItemLabel(trendKey));
 
   return (
-    <Card variant="outlined" sx={t => statCardSx(t, paletteKey)}>
+    <Card
+      variant="outlined"
+      sx={t => statCardSx(t, paletteKey)}
+      onClick={() => onOpenDetail(color)}
+      onKeyDown={e => {
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onOpenDetail(color);
+        }
+      }}
+      role="button"
+      tabIndex={0}
+      aria-label={`${label}: ${value.toLocaleString()}. Click for trend details.`}
+    >
       <CardContent sx={{ py: 2, "&:last-child": { pb: 2 } }}>
         <Stack direction="row" sx={{ alignItems: "flex-start", justifyContent: "space-between", mb: 1 }}>
           <Typography variant="subtitle2" color="text.secondary" sx={{ fontWeight: 600 }}>
@@ -274,21 +302,30 @@ function StatCard({
           <Box sx={{ color, display: "flex", opacity: 0.9 }}>{icon}</Box>
         </Stack>
 
-        <Stack direction="row" sx={{ alignItems: "baseline", gap: 1, flexWrap: "wrap" }}>
-          <AnimatedStatValue value={value} />
-          {trendInsight ? (
+        <Stack direction="row" sx={{ alignItems: "center", gap: 1, flexWrap: "wrap", minHeight: 40 }}>
+          {valuePending ? (
+            <CircularProgress size={28} sx={{ color }} />
+          ) : (
+            <AnimatedStatValue value={value} />
+          )}
+          {!valuePending && trendInsight ? (
             <StatTrendBadge
               direction={trendInsight.direction}
               label={trendInsight.label}
               summary={trendInsight.summary}
-              loading={trendsLoading}
+              isPending={trendsPending}
             />
-          ) : trendsLoading ? (
+          ) : !valuePending && trendsPending ? (
             <Skeleton width={72} height={24} />
           ) : null}
         </Stack>
 
-        <StatTrendChart data={series} monthLabels={periodLabels} color={color} loading={trendsLoading} />
+        <StatTrendChart
+          data={series}
+          monthLabels={periodLabels}
+          color={color}
+          isPending={chartPending}
+        />
       </CardContent>
     </Card>
   );
@@ -298,14 +335,18 @@ function openPullRequests(repo: Repository): number {
   return repo.open_pull_requests_count ?? 0;
 }
 
+type DetailState = Omit<StatTrendDetailProps, "open" | "onClose">;
+
 export function DashboardStats({
   repositories,
   organization,
   trendPoints = [],
-  trendsLoading = false,
+  reposPending = false,
+  trendsPending = false,
   trendsWarning = null,
 }: DashboardStatsProps) {
   const { showStats, toggleShowStats } = useStatCardsPreferences();
+  const [detail, setDetail] = useState<DetailState | null>(null);
   const yearlyTrendPoints = useMemo(
     () => buildYearlyTrendsFromRepos(repositories),
     [repositories],
@@ -379,18 +420,53 @@ export function DashboardStats({
           </Alert>
         )}
         <Grid container spacing={2}>
-          {stats.map(stat => (
-            <Grid key={stat.label} size={{ xs: 12, sm: 6, md: 3 }}>
-              <StatCard
-                {...stat}
-                chartPoints={usesYearlyTrend(stat.trendKey) ? yearlyTrendPoints : trendPoints}
-                granularity={usesYearlyTrend(stat.trendKey) ? "year" : "month"}
-                trendsLoading={usesYearlyTrend(stat.trendKey) ? false : trendsLoading}
-              />
-            </Grid>
-          ))}
+          {stats.map(stat => {
+            const yearly = usesYearlyTrend(stat.trendKey);
+            const chartPoints = yearly ? yearlyTrendPoints : trendPoints;
+            return (
+              <Grid key={stat.label} size={{ xs: 12, sm: 6, md: 3 }}>
+                <StatCard
+                  {...stat}
+                  chartPoints={chartPoints}
+                  granularity={yearly ? "year" : "month"}
+                  valuePending={reposPending}
+                  chartPending={yearly ? reposPending : trendsPending}
+                  trendsPending={yearly ? reposPending : trendsPending}
+                  onOpenDetail={color =>
+                    setDetail({
+                      label: stat.label,
+                      icon: stat.icon,
+                      value: stat.value,
+                      color,
+                      trendKey: stat.trendKey,
+                      granularity: yearly ? "year" : "month",
+                      chartPoints,
+                      trendsPending: yearly ? reposPending : trendsPending,
+                      organization,
+                    })
+                  }
+                />
+              </Grid>
+            );
+          })}
         </Grid>
       </Collapse>
+
+      {detail && (
+        <StatTrendDetailDialog
+          open
+          onClose={() => setDetail(null)}
+          label={detail.label}
+          icon={detail.icon}
+          value={detail.value}
+          color={detail.color}
+          trendKey={detail.trendKey}
+          granularity={detail.granularity}
+          chartPoints={detail.chartPoints}
+          trendsPending={detail.trendsPending}
+          organization={detail.organization}
+        />
+      )}
     </Box>
   );
 }

@@ -22,6 +22,9 @@ const server = serve({
     "/*": index,
   },
 
+  // GitHub aggregation (repo list + trends) can exceed the default 10s on cold cache.
+  idleTimeout: 120,
+
   development: process.env.NODE_ENV !== "production" && {
     hmr: true,
     console: true,

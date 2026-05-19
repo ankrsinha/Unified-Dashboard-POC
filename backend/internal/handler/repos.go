@@ -33,7 +33,7 @@ func (h *Handler) listOrgRepositories(w http.ResponseWriter, r *http.Request, or
 	key := "repos:" + org
 
 	resp, hit, err := getOrFetch(h, r, key, func() (repositoriesResponse, error) {
-		ctx, cancel := contextWithTimeout(r, 120*time.Second)
+		ctx, cancel := contextWithTimeout(r, 180*time.Second)
 		defer cancel()
 
 		repos, err := h.github.ListOrgRepositories(ctx, org)
@@ -43,7 +43,14 @@ func (h *Handler) listOrgRepositories(w http.ResponseWriter, r *http.Request, or
 		if repos == nil {
 			repos = []ghclient.Repository{}
 		}
-		h.github.FillOpenPullRequestCounts(ctx, repos)
+		// Open PR counts come from GraphQL enrichment (one org query). Per-repo REST
+		// counting was removed — it timed out on large orgs and broke dashboard stats.
+		if err := h.github.EnrichRepositoryReleases(ctx, org, repos); err != nil {
+			h.log.Warn("graphql release enrichment failed", "org", org, "error", err)
+		}
+		if !h.github.Authenticated() {
+			h.github.FillOpenPullRequestCounts(ctx, repos)
+		}
 		return repositoriesResponse{
 			Organization: org,
 			Count:        len(repos),

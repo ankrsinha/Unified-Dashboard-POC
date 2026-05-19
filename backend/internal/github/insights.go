@@ -20,6 +20,13 @@ type PullRequestItem struct {
 	Title     string `json:"title"`
 	HTMLURL   string `json:"html_url"`
 	CreatedAt string `json:"created_at,omitempty"`
+	UpdatedAt string `json:"updated_at,omitempty"`
+}
+
+type LatestRelease struct {
+	Tag         string `json:"tag"`
+	PublishedAt string `json:"published_at,omitempty"`
+	URL         string `json:"url"`
 }
 
 type CategoryInsight struct {
@@ -32,9 +39,10 @@ type CategoryInsight struct {
 }
 
 type RepoInsights struct {
-	Repository string            `json:"repository"`
-	Metrics    TrackingMetrics   `json:"metrics"`
-	Categories []CategoryInsight `json:"categories"`
+	Repository     string            `json:"repository"`
+	Metrics        TrackingMetrics   `json:"metrics"`
+	Categories     []CategoryInsight `json:"categories"`
+	LatestRelease  *LatestRelease    `json:"latest_release,omitempty"`
 }
 
 func (c *Client) RepoInsights(ctx context.Context, owner, repo string) (*RepoInsights, error) {
@@ -53,6 +61,15 @@ func (c *Client) RepoInsights(ctx context.Context, owner, repo string) (*RepoIns
 	if err != nil {
 		return nil, err
 	}
+
+	openIssues, err := c.listOpenIssues(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now().UTC()
+	stalePRs := filterStalePRs(prs, now)
+	staleIssues := filterStaleIssues(openIssues, now)
 
 	deps, _ := c.countDependabotAlerts(ctx, owner, repo)
 	ciRate, avgMin, runs, _ := c.workflowMetrics(ctx, owner, repo)
@@ -87,6 +104,20 @@ func (c *Client) RepoInsights(ctx context.Context, owner, repo string) (*RepoIns
 			PullRequests: prs,
 		},
 		{
+			Key:          "stale_prs",
+			Label:        "Stale PRs",
+			Total:        len(stalePRs),
+			Monthly:      groupPRsByMonth(stalePRs),
+			PullRequests: stalePRs,
+		},
+		{
+			Key:     "stale_issues",
+			Label:   "Stale issues",
+			Total:   len(staleIssues),
+			Monthly: groupIssuesByMonth(staleIssues),
+			Issues:  staleIssues,
+		},
+		{
 			Key:     "dependency_alerts",
 			Label:   "Dependency alerts",
 			Total:   deps,
@@ -94,8 +125,11 @@ func (c *Client) RepoInsights(ctx context.Context, owner, repo string) (*RepoIns
 		},
 	}
 
+	release, _ := c.latestRelease(ctx, owner, repo)
+
 	return &RepoInsights{
 		Repository: owner + "/" + repo,
+		LatestRelease: release,
 		Metrics: TrackingMetrics{
 			GoodFirstIssues:     len(gfi),
 			OpenBugs:            len(bugs),
@@ -150,6 +184,9 @@ func (c *Client) listOpenPullRequests(ctx context.Context, owner, repo string) (
 			if pr.CreatedAt != nil {
 				item.CreatedAt = pr.CreatedAt.Format(time.RFC3339)
 			}
+			if pr.UpdatedAt != nil {
+				item.UpdatedAt = pr.UpdatedAt.Format(time.RFC3339)
+			}
 			out = append(out, item)
 		}
 		if resp.NextPage == 0 {
@@ -158,6 +195,70 @@ func (c *Client) listOpenPullRequests(ctx context.Context, owner, repo string) (
 		opts.Page = resp.NextPage
 	}
 	return out, nil
+}
+
+func (c *Client) listOpenIssues(ctx context.Context, owner, repo string) ([]Issue, error) {
+	opts := &gh.IssueListByRepoOptions{
+		State:       "open",
+		ListOptions: gh.ListOptions{PerPage: 100},
+	}
+	var out []Issue
+	for {
+		issues, resp, err := c.api.Issues.ListByRepo(ctx, owner, repo, opts)
+		if err != nil {
+			return nil, fmt.Errorf("list open issues: %w", err)
+		}
+		for _, i := range issues {
+			if i.PullRequestLinks != nil {
+				continue
+			}
+			out = append(out, mapIssue(i))
+		}
+		if resp.NextPage == 0 {
+			break
+		}
+		opts.Page = resp.NextPage
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Number > out[j].Number })
+	return out, nil
+}
+
+func (c *Client) latestRelease(ctx context.Context, owner, repo string) (*LatestRelease, error) {
+	rel, _, err := c.api.Repositories.GetLatestRelease(ctx, owner, repo)
+	if err != nil {
+		return nil, err
+	}
+	if rel == nil {
+		return nil, nil
+	}
+	out := &LatestRelease{
+		Tag: rel.GetTagName(),
+		URL: rel.GetHTMLURL(),
+	}
+	if rel.PublishedAt != nil {
+		out.PublishedAt = rel.PublishedAt.Format(time.RFC3339)
+	}
+	return out, nil
+}
+
+func filterStalePRs(prs []PullRequestItem, now time.Time) []PullRequestItem {
+	out := make([]PullRequestItem, 0)
+	for _, pr := range prs {
+		if isStaleISO(pr.UpdatedAt, now) {
+			out = append(out, pr)
+		}
+	}
+	return out
+}
+
+func filterStaleIssues(issues []Issue, now time.Time) []Issue {
+	out := make([]Issue, 0)
+	for _, issue := range issues {
+		if isStaleISO(issue.UpdatedAt, now) {
+			out = append(out, issue)
+		}
+	}
+	return out
 }
 
 func filterLinkedIssues(issues []Issue) []Issue {

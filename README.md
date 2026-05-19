@@ -73,16 +73,11 @@ frontend/         React + MUI UI (Bun dev server)
 deploy/           Docker, Kubernetes/OpenShift, Tekton pipeline
 ```
 
-## Useful API endpoints
+## API documentation
 
-| Endpoint                                        | Description               |
-| ----------------------------------------------- | ------------------------- |
-| `GET /api/health`                               | Health + cache info       |
-| `GET /api/repositories`                         | Org repositories          |
-| `GET /api/repositories/{owner}/{name}/insights` | Per-repo charts data      |
-| `GET /api/tracking/summary`                     | Org-wide tracking summary |
+Full endpoint reference, trends behavior, and AI mode: **[backend/API.md](backend/API.md)**.
 
-Append `?refresh=true` to bypass the 15-minute server cache.
+Quick links: `GET /api/health`, `GET /api/repositories`, `GET /api/repositories/{owner}/{name}/insights`, `GET /api/tracking/trends`. Append `?refresh=true` to bypass cache; `?ai_mode=true` enables Gemini issue complexity (requires `GEMINI_API_KEY`).
 
 ## Deployment (ignore this for now - not verified)
 

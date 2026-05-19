@@ -73,12 +73,12 @@ func (c *Client) AnalyzeIssueComplexity(ctx context.Context, repoDescription, re
 	batches := splitIntoBatches(prepared, batchSize)
 
 	var (
-		mu       sync.Mutex
-		merged   = make(map[int]string, len(prepared))
-		wg       sync.WaitGroup
-		errors   []error
-		hits     int
-		misses   int
+		mu     sync.Mutex
+		merged = make(map[int]string, len(prepared))
+		wg     sync.WaitGroup
+		errors []error
+		hits   int
+		misses int
 	)
 
 	for i, batch := range batches {

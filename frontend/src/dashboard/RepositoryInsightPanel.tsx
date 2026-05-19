@@ -1,7 +1,7 @@
 import CachedIcon from "@mui/icons-material/Cached";
 import CloseIcon from "@mui/icons-material/Close";
+import FilterAltOffIcon from "@mui/icons-material/FilterAltOff";
 import OpenInNewIcon from "@mui/icons-material/OpenInNew";
-import RefreshIcon from "@mui/icons-material/Refresh";
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
 import Chip from "@mui/material/Chip";
@@ -9,29 +9,32 @@ import Fade from "@mui/material/Fade";
 import Grid from "@mui/material/Grid";
 import IconButton from "@mui/material/IconButton";
 import Link from "@mui/material/Link";
-import List from "@mui/material/List";
-import ListItem from "@mui/material/ListItem";
-import ListItemText from "@mui/material/ListItemText";
+import Paper from "@mui/material/Paper";
 import Stack from "@mui/material/Stack";
 import Tooltip from "@mui/material/Tooltip";
 import Typography from "@mui/material/Typography";
 import { BarChart } from "@mui/x-charts/BarChart";
 import { PieChart } from "@mui/x-charts/PieChart";
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import {
-  fetchRepoInsights,
-  type CategoryInsight,
-  type Issue,
-  type PullRequestItem,
-  type Repository,
-} from "../api/client";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
+import type { CategoryInsight, Issue, PullRequestItem, Repository } from "../api/client";
 import { useAiMode } from "../theme/AiModeContext";
+import { useDelayedPending } from "../hooks/useDelayedPending";
+import { useRepoInsightsQuery } from "../query/insightsQuery";
 import { InsightsLoading } from "./InsightsLoading";
 import { describeLatestMonthTrend } from "./statTrendUtils";
 import { TrendInsightBanner } from "./TrendInsightBanner";
 
-const CHART_COLORS = ["#1976d2", "#d32f2f", "#ed6c02", "#2e7d32", "#9c27b0"];
+const CHART_COLORS = [
+  "#1976d2",
+  "#d32f2f",
+  "#ed6c02",
+  "#2e7d32",
+  "#9c27b0",
+  "#00838f",
+  "#6d4c41",
+];
 const LOADING_DELAY_MS = 150;
+const STALE_DAYS = 30;
 
 /** Backend sends months as `YYYY-MM` (UTC). */
 function formatMonthLabel(yearMonth: string): string {
@@ -45,9 +48,24 @@ function formatMonthLabel(yearMonth: string): string {
   });
 }
 
+function formatReleaseDate(iso?: string): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+function createdYearMonth(iso?: string): string | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
 function trendItemLabel(categoryKey: string): string {
-  if (categoryKey === "pending_prs") return "pull requests opened";
+  if (categoryKey === "pending_prs" || categoryKey === "stale_prs") return "pull requests opened";
   if (categoryKey === "dependency_alerts") return "alerts";
+  if (categoryKey === "stale_issues") return "stale issues opened";
   return "issues opened";
 }
 
@@ -56,6 +74,28 @@ function monthRangeLabel(months: string[]): string | null {
   const first = formatMonthLabel(months[0]!);
   const last = formatMonthLabel(months[months.length - 1]!);
   return first === last ? first : `${first} – ${last}`;
+}
+
+function isPrCategory(key: string): boolean {
+  return key === "pending_prs" || key === "stale_prs";
+}
+
+function filterCategoryByMonth(category: CategoryInsight, month: string | null): CategoryInsight {
+  if (!month) return category;
+
+  if (category.pull_requests?.length) {
+    const pull_requests = category.pull_requests.filter(
+      pr => createdYearMonth(pr.created_at) === month,
+    );
+    return { ...category, pull_requests, total: pull_requests.length };
+  }
+
+  if (category.issues?.length) {
+    const issues = category.issues.filter(issue => createdYearMonth(issue.created_at) === month);
+    return { ...category, issues, total: issues.length };
+  }
+
+  return category;
 }
 
 type RepositoryInsightPanelProps = {
@@ -88,66 +128,53 @@ function PanelToolbar({
 
 export function RepositoryInsightPanel({ repo, refreshTrigger, onClose }: RepositoryInsightPanelProps) {
   const { aiMode } = useAiMode();
-  const [categories, setCategories] = useState<CategoryInsight[]>([]);
-  const [selectedKey, setSelectedKey] = useState<string>("good_first_issues");
-  const [ready, setReady] = useState(false);
-  const [showLoader, setShowLoader] = useState(false);
-  const [fromCache, setFromCache] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const parts = repo.full_name.split("/");
+  const owner = parts[0] ?? "";
+  const name = parts[1] ?? "";
 
-  const applyInsights = useCallback((data: Awaited<ReturnType<typeof fetchRepoInsights>>["data"]) => {
-    const list = Array.isArray(data.categories) ? data.categories : [];
-    setCategories(list);
-    const first = list.find(c => c.total > 0)?.key ?? list[0]?.key ?? "good_first_issues";
-    setSelectedKey(first);
-  }, []);
+  const insightsQuery = useRepoInsightsQuery(
+    owner,
+    name,
+    refreshTrigger > 0,
+    aiMode,
+    Boolean(owner && name),
+  );
+
+  const [selectedKey, setSelectedKey] = useState("good_first_issues");
+  const [monthFilter, setMonthFilter] = useState<string | null>(null);
+
+  const isPending = insightsQuery.isPending && !insightsQuery.data;
+  const loaderDelay = refreshTrigger > 0 ? 0 : LOADING_DELAY_MS;
+  const showLoader = useDelayedPending(isPending, loaderDelay);
+
+  const safeCategories = insightsQuery.data?.categories ?? [];
+  const latestRelease = insightsQuery.data?.latestRelease ?? null;
+  const fromCache = insightsQuery.data?.fromCache ?? false;
+  const error =
+    insightsQuery.isError && !insightsQuery.data
+      ? insightsQuery.error instanceof Error
+        ? insightsQuery.error.message
+        : "Failed to load insights"
+      : null;
 
   useEffect(() => {
-    const [owner, name] = repo.full_name.split("/");
-    let cancelled = false;
-    const forceRefresh = refreshTrigger > 0;
-
-    setError(null);
-    setFromCache(false);
-    setReady(false);
-    setCategories([]);
-    setShowLoader(forceRefresh);
-
-    let loadingTimer: ReturnType<typeof setTimeout> | undefined;
-    if (!forceRefresh) {
-      loadingTimer = setTimeout(() => {
-        if (!cancelled) setShowLoader(true);
-      }, LOADING_DELAY_MS);
+    if (insightsQuery.data?.selectedKey) {
+      setSelectedKey(insightsQuery.data.selectedKey);
+      setMonthFilter(null);
     }
+  }, [insightsQuery.data?.selectedKey]);
 
-    fetchRepoInsights(owner, name, { refresh: forceRefresh, aiMode })
-      .then(({ data, fromCache: cached }) => {
-        if (cancelled) return;
-        clearTimeout(loadingTimer);
-        applyInsights(data);
-        setFromCache(cached);
-        setShowLoader(false);
-        setReady(true);
-      })
-      .catch(err => {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to load insights");
-          setShowLoader(false);
-          setReady(true);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-      clearTimeout(loadingTimer);
-    };
-  }, [repo.full_name, refreshTrigger, aiMode, applyInsights]);
-
-  const safeCategories = categories ?? [];
+  const defaultCategoryKey = (list: CategoryInsight[]) =>
+    list.find(c => c.total > 0)?.key ?? list[0]?.key ?? "good_first_issues";
 
   const selected = useMemo(
     () => safeCategories.find(c => c.key === selectedKey) ?? safeCategories[0],
     [safeCategories, selectedKey],
+  );
+
+  const filteredSelected = useMemo(
+    () => (selected ? filterCategoryByMonth(selected, monthFilter) : undefined),
+    [selected, monthFilter],
   );
 
   const pieData = useMemo(
@@ -161,7 +188,23 @@ export function RepositoryInsightPanel({ repo, refreshTrigger, onClose }: Reposi
     [safeCategories],
   );
 
-  const hasInsightData = useMemo(() => pieData.some(d => d.value > 0), [pieData]);
+  const hasInsightData = useMemo(
+    () => pieData.some(d => d.value > 0) || Boolean(latestRelease?.url),
+    [pieData, latestRelease],
+  );
+
+  const defaultKey = defaultCategoryKey(safeCategories);
+  const hasActiveFilters = monthFilter !== null || selectedKey !== defaultKey;
+
+  const resetAllFilters = () => {
+    setMonthFilter(null);
+    setSelectedKey(defaultKey);
+  };
+
+  const selectCategory = (key: string) => {
+    setSelectedKey(key);
+    setMonthFilter(null);
+  };
 
   const panelShellSx = {
     p: 2,
@@ -170,7 +213,7 @@ export function RepositoryInsightPanel({ repo, refreshTrigger, onClose }: Reposi
     borderColor: "divider",
   } as const;
 
-  if (!ready) {
+  if (isPending && safeCategories.length === 0) {
     return (
       <Box sx={panelShellSx}>
         <PanelToolbar onClose={onClose}>
@@ -192,7 +235,7 @@ export function RepositoryInsightPanel({ repo, refreshTrigger, onClose }: Reposi
     );
   }
 
-  if (safeCategories.length === 0 || !selected) {
+  if (safeCategories.length === 0 || !selected || !filteredSelected) {
     return (
       <Box sx={panelShellSx}>
         <PanelToolbar onClose={onClose}>
@@ -217,8 +260,8 @@ export function RepositoryInsightPanel({ repo, refreshTrigger, onClose }: Reposi
           )}
         </PanelToolbar>
         <Typography variant="body2" color="text.secondary">
-          Nothing to show yet — no open good-first issues, bugs, pull requests, or dependency alerts
-          were found for this repository.
+          Nothing to show yet — no open good-first issues, bugs, pull requests, stale items, or
+          dependency alerts were found for this repository.
         </Typography>
       </Box>
     );
@@ -232,6 +275,11 @@ export function RepositoryInsightPanel({ repo, refreshTrigger, onClose }: Reposi
   const selectedBarColor =
     pieData.find(d => d.id === selectedKey)?.color ?? CHART_COLORS[0] ?? "#1976d2";
 
+  const listCount = filteredSelected.total;
+  const listTitle = monthFilter
+    ? `${selected.label} in ${formatMonthLabel(monthFilter)} (${listCount})`
+    : `${selected.label} (${listCount})`;
+
   return (
     <Fade in timeout={400}>
       <Box sx={panelShellSx}>
@@ -242,16 +290,91 @@ export function RepositoryInsightPanel({ repo, refreshTrigger, onClose }: Reposi
               <Chip icon={<CachedIcon />} label="Cached" size="small" variant="outlined" />
             </Tooltip>
           )}
+          {latestRelease?.url && (
+            <Chip
+              component="a"
+              href={latestRelease.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              clickable
+              size="small"
+              variant="outlined"
+              label={
+                latestRelease.published_at
+                  ? `Release ${latestRelease.tag} · ${formatReleaseDate(latestRelease.published_at)}`
+                  : `Release ${latestRelease.tag}`
+              }
+              onClick={e => e.stopPropagation()}
+            />
+          )}
+          <Tooltip title={hasActiveFilters ? "Clear category and month filters" : "No filters to reset"}>
+            <span>
+              <Chip
+                icon={<FilterAltOffIcon />}
+                label="Reset filters"
+                size="small"
+                variant="outlined"
+                disabled={!hasActiveFilters}
+                clickable={hasActiveFilters}
+                onClick={
+                  hasActiveFilters
+                    ? e => {
+                        e.stopPropagation();
+                        resetAllFilters();
+                      }
+                    : undefined
+                }
+              />
+            </span>
+          </Tooltip>
         </PanelToolbar>
-        <Grid container spacing={2}>
-          <Grid size={{ xs: 12, md: 4 }}>
-            <Typography variant="subtitle2" gutterBottom>
-              Workload mix — click a segment
-            </Typography>
-            <PieChart
+
+        <Stack spacing={1.5} sx={{ mb: 1.5 }}>
+          <Stack direction="row" spacing={1} sx={{ flexWrap: "wrap", alignItems: "center" }}>
+            <Chip
+              size="small"
+              color="primary"
+              variant={selectedKey === defaultKey && !monthFilter ? "filled" : "outlined"}
+              label={selected.label}
+              onDelete={
+                selectedKey !== defaultKey
+                  ? () => {
+                      setSelectedKey(defaultKey);
+                      setMonthFilter(null);
+                    }
+                  : undefined
+              }
+            />
+            {monthFilter && (
+              <Chip
+                size="small"
+                variant="outlined"
+                label={`Month: ${formatMonthLabel(monthFilter)}`}
+                onDelete={() => setMonthFilter(null)}
+              />
+            )}
+          </Stack>
+          {monthTrend && <TrendInsightBanner insight={monthTrend} color={selectedBarColor} />}
+        </Stack>
+
+        <Paper
+          variant="outlined"
+          sx={{
+            p: 2,
+            mb: 2,
+            borderRadius: 2,
+            bgcolor: "background.paper",
+          }}
+        >
+          <Grid container spacing={2}>
+            <Grid size={{ xs: 12, md: 4 }}>
+              <Typography variant="subtitle2" gutterBottom>
+                Workload mix — click a segment
+              </Typography>
+              <PieChart
               series={[
                 {
-                  data: pieData,
+                  data: pieData.filter(d => d.value > 0),
                   innerRadius: 50,
                   outerRadius: 90,
                   paddingAngle: 2,
@@ -262,58 +385,70 @@ export function RepositoryInsightPanel({ repo, refreshTrigger, onClose }: Reposi
               ]}
               height={220}
               onItemClick={(_e, item) => {
-                if (item?.dataIndex != null && pieData[item.dataIndex]) {
-                  setSelectedKey(String(pieData[item.dataIndex].id));
+                const slice = pieData.filter(d => d.value > 0);
+                const entry = item?.dataIndex != null ? slice[item.dataIndex] : undefined;
+                if (entry) {
+                  selectCategory(String(entry.id));
                 }
               }}
             />
-          </Grid>
-          <Grid size={{ xs: 12, md: 8 }}>
-            <Typography variant="subtitle2" gutterBottom>
-              {selected.label} opened by month
-            </Typography>
-            {monthRange && (
-              <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1 }}>
-                {monthRange} · by GitHub creation date (open items only)
-              </Typography>
-            )}
-            {monthTrend && <TrendInsightBanner insight={monthTrend} color={selectedBarColor} />}
-            {months.length > 0 ? (
-              <>
-                <BarChart
-                  xAxis={[{ scaleType: "band", data: monthLabels }]}
-                  series={[
-                    {
-                      data: counts,
-                      label: selected.label,
-                      color: selectedBarColor,
-                      barLabel: "value",
-                      barLabelPlacement: "outside",
-                    },
-                  ]}
-                  height={220}
-                  margin={{ left: 40, right: 12, top: 20, bottom: 48 }}
-                />
+              {(selectedKey === "stale_prs" || selectedKey === "stale_issues") && (
                 <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>
-                  Each bar is how many were opened that month. Numbers on bars are counts. Compare
-                  heights month to month — the banner above explains the latest change.
+                  Stale = no GitHub activity for {STALE_DAYS}+ days
                 </Typography>
-              </>
-            ) : (
-              <Typography variant="body2" color="text.secondary">
-                No dated items for this category.
+              )}
+            </Grid>
+            <Grid size={{ xs: 12, md: 8 }}>
+              <Typography variant="subtitle2" gutterBottom>
+                {selected.label} opened by month
               </Typography>
-            )}
+              {monthRange && (
+                <Typography variant="caption" color="text.secondary" sx={{ display: "block", mb: 1 }}>
+                  {monthRange} · by creation date · click a bar to filter the list below
+                </Typography>
+              )}
+              {months.length > 0 ? (
+                <>
+                  <BarChart
+                    xAxis={[{ scaleType: "band", data: monthLabels }]}
+                    series={[
+                      {
+                        data: counts,
+                        label: selected.label,
+                        color: selectedBarColor,
+                        barLabel: "value",
+                        barLabelPlacement: "outside",
+                      },
+                    ]}
+                    height={220}
+                    margin={{ left: 32, right: 12, top: 16, bottom: 48 }}
+                    yAxis={[{ width: 36, tickLabelStyle: { fontSize: 11 } }]}
+                    onItemClick={(_e, item) => {
+                      if (item?.dataIndex != null && months[item.dataIndex]) {
+                        setMonthFilter(months[item.dataIndex]!);
+                      }
+                    }}
+                  />
+                  <Typography variant="caption" color="text.secondary" sx={{ display: "block", mt: 1 }}>
+                    Each bar is how many were opened that month. Click a bar to filter the list, or use
+                    Reset filters to show all months.
+                  </Typography>
+                </>
+              ) : (
+                <Typography variant="body2" color="text.secondary">
+                  No dated items for this category.
+                </Typography>
+              )}
+            </Grid>
           </Grid>
-          <Grid size={{ xs: 12 }}>
-            <Typography variant="subtitle2" gutterBottom>
-              {selected.label} ({selected.total})
-            </Typography>
-            <List dense disablePadding sx={{ maxHeight: 200, overflow: "auto" }}>
-              <CategoryItemList category={selected} />
-            </List>
-          </Grid>
-        </Grid>
+        </Paper>
+
+        <Box>
+          <Typography variant="subtitle2" gutterBottom>
+            {listTitle}
+          </Typography>
+          <CategoryItemList category={filteredSelected} />
+        </Box>
       </Box>
     </Fade>
   );
@@ -336,92 +471,204 @@ function ComplexityChip({ complexity }: { complexity?: string }) {
         color={config.color}
         size="small"
         variant="outlined"
-        sx={{ ml: 1, fontWeight: 600, fontSize: "0.7rem", height: 22 }}
+        sx={{
+          flexShrink: 0,
+          height: 24,
+          display: "inline-flex",
+          alignItems: "center",
+          fontWeight: 600,
+          fontSize: "0.75rem",
+          "& .MuiChip-label": {
+            px: 0.75,
+            py: 0,
+            lineHeight: 1,
+            display: "flex",
+            alignItems: "center",
+          },
+        }}
       />
     </Tooltip>
   );
 }
 
+function formatItemDate(iso?: string): string | undefined {
+  if (!iso) return undefined;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return undefined;
+  return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+}
+
+function itemDateSubtitle(createdAt?: string, updatedAt?: string, stale = false): string | undefined {
+  const updated = formatItemDate(updatedAt);
+  const created = formatItemDate(createdAt);
+  if (stale && updated) return `Last updated ${updated}`;
+  if (created) return `Opened ${created}`;
+  if (updated) return `Updated ${updated}`;
+  return undefined;
+}
+
+
+function InsightList({ children }: { children: ReactNode }) {
+  return (
+    <Stack spacing={1} sx={{ maxHeight: 280, overflow: "auto", pr: 0.25, pt: 0.5 }}>
+      {children}
+    </Stack>
+  );
+}
+
+function InsightEmptyState({ children }: { children: ReactNode }) {
+  return (
+    <Paper variant="outlined" sx={{ px: 2, py: 1.5, borderRadius: 1.5, bgcolor: "background.paper" }}>
+      <Typography variant="body2" color="text.secondary">
+        {children}
+      </Typography>
+    </Paper>
+  );
+}
+
+function InsightItemRow({
+  number,
+  title,
+  href,
+  subtitle,
+  complexity,
+}: {
+  number: number;
+  title: string;
+  href: string;
+  subtitle?: string;
+  complexity?: string;
+}) {
+  return (
+    <Paper
+      variant="outlined"
+      sx={theme => ({
+        px: 1.5,
+        py: 1.25,
+        display: "flex",
+        alignItems: "center",
+        gap: 1.25,
+        borderRadius: 1.5,
+        bgcolor: "background.paper",
+        transition: theme.transitions.create(["border-color", "box-shadow", "background-color"], {
+          duration: theme.transitions.duration.shortest,
+        }),
+        "&:hover": {
+          borderColor: "primary.main",
+          bgcolor: "action.hover",
+          boxShadow: 1,
+        },
+      })}
+    >
+      <Chip
+        label={`#${number}`}
+        size="small"
+        color="primary"
+        variant="outlined"
+        sx={{
+          fontWeight: 700,
+          flexShrink: 0,
+          height: 26,
+          display: "inline-flex",
+          alignItems: "center",
+          "& .MuiChip-label": { px: 1, py: 0, lineHeight: 1, display: "flex", alignItems: "center" },
+        }}
+      />
+      <Box sx={{ flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 0.25 }}>
+        <Link
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          underline="hover"
+          color="text.primary"
+          sx={{
+            fontWeight: 500,
+            fontSize: "0.875rem",
+            lineHeight: 1.45,
+            display: "block",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {title}
+        </Link>
+        {subtitle && (
+          <Typography variant="caption" color="text.secondary" sx={{ display: "block" }}>
+            {subtitle}
+          </Typography>
+        )}
+      </Box>
+      <Stack direction="row" spacing={0.5} sx={{ alignItems: "center", flexShrink: 0 }}>
+        {complexity && <ComplexityChip complexity={complexity} />}
+        <Tooltip title="Open on GitHub">
+          <IconButton
+            component="a"
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            size="small"
+            aria-label="Open on GitHub"
+            sx={{
+              border: 1,
+              borderColor: "divider",
+              "&:hover": { borderColor: "primary.main", bgcolor: "action.selected" },
+            }}
+          >
+            <OpenInNewIcon fontSize="small" />
+          </IconButton>
+        </Tooltip>
+      </Stack>
+    </Paper>
+  );
+}
+
 function CategoryItemList({ category }: { category: CategoryInsight }) {
-  if (category.key === "pending_prs") {
+  const stale = category.key === "stale_prs" || category.key === "stale_issues";
+
+  if (isPrCategory(category.key)) {
     if (!category.pull_requests?.length) {
-      return <Typography variant="body2" color="text.secondary">No items.</Typography>;
+      return <InsightEmptyState>No items match the current filters.</InsightEmptyState>;
     }
     return (
-      <>
+      <InsightList>
         {category.pull_requests.map((pr: PullRequestItem) => (
-          <ListItem
+          <InsightItemRow
             key={pr.id}
-            divider
-            secondaryAction={
-              <IconButton
-                component="a"
-                href={pr.html_url}
-                target="_blank"
-                rel="noopener noreferrer"
-                size="small"
-                aria-label="Open on GitHub"
-              >
-                <OpenInNewIcon fontSize="small" />
-              </IconButton>
-            }
-          >
-            <ListItemText
-              primary={
-                <Link href={pr.html_url} target="_blank" rel="noopener noreferrer" underline="hover">
-                  #{pr.number} {pr.title}
-                </Link>
-              }
-            />
-          </ListItem>
+            number={pr.number}
+            title={pr.title}
+            href={pr.html_url}
+            subtitle={itemDateSubtitle(pr.created_at, pr.updated_at, stale)}
+          />
         ))}
-      </>
+      </InsightList>
     );
   }
 
   if (category.key === "dependency_alerts") {
     return (
-      <Typography variant="body2" color="text.secondary">
+      <InsightEmptyState>
         {category.total} open Dependabot alert(s). Enable GITHUB_TOKEN for alert details.
-      </Typography>
+      </InsightEmptyState>
     );
   }
 
   if (!category.issues?.length) {
-    return <Typography variant="body2" color="text.secondary">No items.</Typography>;
+    return <InsightEmptyState>No items match the current filters.</InsightEmptyState>;
   }
 
   return (
-    <>
+    <InsightList>
       {category.issues.map((issue: Issue) => (
-        <ListItem
+        <InsightItemRow
           key={issue.id}
-          divider
-          secondaryAction={
-            <IconButton
-              component="a"
-              href={issue.html_url}
-              target="_blank"
-              rel="noopener noreferrer"
-              size="small"
-              aria-label="Open on GitHub"
-            >
-              <OpenInNewIcon fontSize="small" />
-            </IconButton>
-          }
-        >
-          <ListItemText
-            primary={
-              <Stack direction="row" alignItems="center" flexWrap="wrap">
-                <Link href={issue.html_url} target="_blank" rel="noopener noreferrer" underline="hover">
-                  #{issue.number} {issue.title}
-                </Link>
-                <ComplexityChip complexity={issue.complexity} />
-              </Stack>
-            }
-          />
-        </ListItem>
+          number={issue.number}
+          title={issue.title}
+          href={issue.html_url}
+          subtitle={itemDateSubtitle(issue.created_at, issue.updated_at, stale)}
+          complexity={issue.complexity}
+        />
       ))}
-    </>
+    </InsightList>
   );
 }

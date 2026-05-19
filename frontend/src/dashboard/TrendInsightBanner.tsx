@@ -25,7 +25,7 @@ export function TrendInsightBanner({ insight, color }: TrendInsightBannerProps) 
       variant="outlined"
       icon={<Icon fontSize="small" />}
       sx={{
-        mb: 1.5,
+        mb: 0,
         borderColor: alpha(color, 0.45),
         bgcolor: theme => alpha(color, theme.palette.mode === "light" ? 0.08 : 0.16),
         color: "text.primary",

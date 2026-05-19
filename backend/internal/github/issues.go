@@ -16,6 +16,7 @@ type Issue struct {
 	State      string   `json:"state"`
 	Labels     []string `json:"labels"`
 	CreatedAt  string   `json:"created_at,omitempty"`
+	UpdatedAt  string   `json:"updated_at,omitempty"`
 	Comments   int      `json:"comments"`
 	Body       string   `json:"body,omitempty"`
 	Complexity string   `json:"complexity,omitempty"`
@@ -88,6 +89,9 @@ func mapIssue(i *gh.Issue) Issue {
 	}
 	if i.CreatedAt != nil {
 		issue.CreatedAt = i.CreatedAt.Format(time.RFC3339)
+	}
+	if i.UpdatedAt != nil {
+		issue.UpdatedAt = i.UpdatedAt.Format(time.RFC3339)
 	}
 	for _, l := range i.Labels {
 		issue.Labels = append(issue.Labels, l.GetName())

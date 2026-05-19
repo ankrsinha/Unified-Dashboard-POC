@@ -5,10 +5,15 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 )
 
 const defaultTrendMonths = 6
+const trendsSearchConcurrency = 2
 
 type TrendPoint struct {
 	Month      string `json:"month"`
@@ -19,10 +24,10 @@ type TrendPoint struct {
 }
 
 type OrgTrends struct {
-	Organization    string       `json:"organization"`
-	Points          []TrendPoint `json:"points"`
-	Partial         bool         `json:"partial"`
-	SearchFailures  int          `json:"search_failures"`
+	Organization   string       `json:"organization"`
+	Points         []TrendPoint `json:"points"`
+	Partial        bool         `json:"partial"`
+	SearchFailures int          `json:"search_failures"`
 }
 
 func (c *Client) OrgTrends(ctx context.Context, org string, repos []Repository, months int) (OrgTrends, error) {
@@ -58,70 +63,90 @@ func (c *Client) OrgTrends(ctx context.Context, org string, repos []Repository, 
 		buckets[i].Stars = starsByMonth[key]
 	}
 
-	searchDelay := 400 * time.Millisecond
-	if !c.authenticated {
-		searchDelay = time.Second
-	}
+	var searchFailures atomic.Int32
+	var rateLimited atomic.Bool
+	var mu sync.Mutex
 
-	var searchFailures int
-	rateLimited := false
+	sem := make(chan struct{}, trendsSearchConcurrency)
+	g, gctx := errgroup.WithContext(ctx)
 
 	for i := range buckets {
-		if rateLimited {
-			searchFailures += 2
-			continue
-		}
-
 		key := buckets[i].Month
 		start, end, err := monthBounds(key)
 		if err != nil {
 			slog.Warn("trends month bounds", "month", key, "error", err)
-			searchFailures += 2
+			searchFailures.Add(2)
 			continue
 		}
 
-		if err := sleepCtx(ctx, searchDelay); err != nil {
-			break
-		}
-		prs, err := c.searchIssueCount(ctx, "org:"+org+" is:pr created:"+start+".."+end)
-		if err != nil {
-			searchFailures++
-			if isRateLimitErr(err) {
-				rateLimited = true
+		idx := i
+		g.Go(func() error {
+			if rateLimited.Load() {
+				searchFailures.Add(1)
+				return nil
 			}
-			slog.Warn("trends pr search failed", "org", org, "month", key, "error", err)
-		} else {
-			buckets[i].OpenPRs = prs
-		}
-
-		if rateLimited {
-			searchFailures++
-			continue
-		}
-
-		if err := sleepCtx(ctx, searchDelay); err != nil {
-			break
-		}
-		issues, err := c.searchIssueCount(ctx, "org:"+org+" is:issue created:"+start+".."+end)
-		if err != nil {
-			searchFailures++
-			if isRateLimitErr(err) {
-				rateLimited = true
+			select {
+			case sem <- struct{}{}:
+			case <-gctx.Done():
+				return gctx.Err()
 			}
-			slog.Warn("trends issue search failed", "org", org, "month", key, "error", err)
-		} else {
-			buckets[i].OpenIssues = issues
-		}
+			defer func() { <-sem }()
+
+			prs, err := c.searchIssueCount(gctx, "org:"+org+" is:pr created:"+start+".."+end)
+			if err != nil {
+				searchFailures.Add(1)
+				if isRateLimitErr(err) {
+					rateLimited.Store(true)
+				}
+				slog.Warn("trends pr search failed", "org", org, "month", key, "error", err)
+				return nil
+			}
+			mu.Lock()
+			buckets[idx].OpenPRs = prs
+			mu.Unlock()
+			return nil
+		})
+
+		g.Go(func() error {
+			if rateLimited.Load() {
+				searchFailures.Add(1)
+				return nil
+			}
+			select {
+			case sem <- struct{}{}:
+			case <-gctx.Done():
+				return gctx.Err()
+			}
+			defer func() { <-sem }()
+
+			issues, err := c.searchIssueCount(gctx, "org:"+org+" is:issue created:"+start+".."+end)
+			if err != nil {
+				searchFailures.Add(1)
+				if isRateLimitErr(err) {
+					rateLimited.Store(true)
+				}
+				slog.Warn("trends issue search failed", "org", org, "month", key, "error", err)
+				return nil
+			}
+			mu.Lock()
+			buckets[idx].OpenIssues = issues
+			mu.Unlock()
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return OrgTrends{}, err
 	}
 
 	sort.Slice(buckets, func(i, j int) bool { return buckets[i].Month < buckets[j].Month })
 
-	partial := searchFailures > 0
+	failures := int(searchFailures.Load())
 	return OrgTrends{
 		Organization:   org,
 		Points:         buckets,
-		Partial:        partial,
-		SearchFailures: searchFailures,
+		Partial:        failures > 0,
+		SearchFailures: failures,
 	}, nil
 }
 

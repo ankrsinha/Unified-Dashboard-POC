@@ -1,10 +1,12 @@
 import Alert from "@mui/material/Alert";
 import Box from "@mui/material/Box";
-import CircularProgress from "@mui/material/CircularProgress";
-import { useEffect, useState } from "react";
-import { fetchRepositories, fetchTrackingTrends, type Repository, type TrendPoint } from "../api/client";
-import { buildTrendsFromRepos, mergeTrendPoints } from "./buildTrendsFromRepos";
 import { useAiMode } from "../theme/AiModeContext";
+import {
+  useRefetchTrackingTrendsAfterRepos,
+  useRepositoriesQuery,
+  useTrackingTrendsQuery,
+} from "../query/dashboardQueries";
+import { buildTrendsFromRepos, mergeTrendPoints } from "./buildTrendsFromRepos";
 import { DashboardLayout } from "./DashboardLayout";
 import { DashboardStats } from "./DashboardStats";
 import { Header } from "./Header";
@@ -12,23 +14,38 @@ import { RepositoriesTable } from "./RepositoriesTable";
 
 export function Dashboard() {
   const { aiMode } = useAiMode();
-  const [repos, setRepos] = useState<Repository[]>([]);
-  const [org, setOrg] = useState("tektoncd");
-  const [loading, setLoading] = useState(true);
-  const [reposError, setReposError] = useState<string | null>(null);
-  const [trendPoints, setTrendPoints] = useState<TrendPoint[]>([]);
-  const [trendsLoading, setTrendsLoading] = useState(true);
-  const [trendsWarning, setTrendsWarning] = useState<string | null>(null);
 
-  useEffect(() => {
-    fetchRepositories({ aiMode })
-      .then(data => {
-        setRepos(data.repositories);
-        setOrg(data.organization);
-      })
-      .catch(err => setReposError(err instanceof Error ? err.message : "Failed to load repositories"))
-      .finally(() => setLoading(false));
-  }, []);
+  const reposQuery = useRepositoriesQuery(aiMode);
+  const trendsQuery = useTrackingTrendsQuery(aiMode);
+
+  const repositories = reposQuery.data?.repositories ?? [];
+  const org = reposQuery.data?.organization ?? "tektoncd";
+  const reposPending = reposQuery.isPending && repositories.length === 0;
+  const reposReady = reposQuery.isSuccess && repositories.length > 0;
+
+  useRefetchTrackingTrendsAfterRepos(aiMode, reposReady);
+
+  const localTrendPoints = buildTrendsFromRepos(repositories);
+  const trendPoints = trendsQuery.data
+    ? mergeTrendPoints(trendsQuery.data.points, localTrendPoints)
+    : localTrendPoints;
+
+  let trendsWarning: string | null = null;
+  if (trendsQuery.isError) {
+    trendsWarning =
+      "Could not load monthly PR and issue trends from GitHub. Repository and star trends are still shown.";
+  } else if (trendsQuery.data?.partial && !trendsQuery.isFetching) {
+    trendsWarning =
+      trendsQuery.data.message ??
+      "Some monthly PR and issue counts may be missing due to GitHub search limits.";
+  }
+
+  const reposError =
+    reposQuery.isError && repositories.length === 0
+      ? reposQuery.error instanceof Error
+        ? reposQuery.error.message
+        : "Failed to load repositories"
+      : null;
 
   return (
     <DashboardLayout>
@@ -36,8 +53,8 @@ export function Dashboard() {
         sx={{
           display: "flex",
           flexDirection: "column",
-          height: { xs: "calc(100vh - 120px)", md: "calc(100vh - 140px)" },
-          minHeight: 400,
+          flex: 1,
+          minHeight: 0,
         }}
       >
         <Box sx={{ flexShrink: 0, pb: 2 }}>
@@ -49,22 +66,16 @@ export function Dashboard() {
           {reposError && <Alert severity="error">{reposError}</Alert>}
         </Box>
 
-        {loading ? (
-          <Box sx={{ display: "flex", justifyContent: "center", flex: 1, alignItems: "center" }}>
-            <CircularProgress />
-          </Box>
-        ) : (
-          <>
-            <DashboardStats
-              repositories={repos}
-              organization={org}
-              trendPoints={trendPoints}
-              trendsLoading={trendsLoading}
-              trendsWarning={trendsWarning}
-            />
-            <RepositoriesTable repositories={repos} />
-          </>
-        )}
+        <DashboardStats
+          repositories={repositories}
+          organization={org}
+          trendPoints={trendPoints}
+          reposPending={reposPending}
+          trendsPending={trendsQuery.isPending && !trendsQuery.isError}
+          trendsWarning={trendsWarning}
+        />
+
+        <RepositoriesTable repositories={repositories} loading={reposPending} />
       </Box>
     </DashboardLayout>
   );

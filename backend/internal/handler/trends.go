@@ -22,7 +22,7 @@ func (h *Handler) TrackingTrends(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := contextWithTimeout(r, 180*time.Second)
 		defer cancel()
 
-		repos, reposFromCache := h.repositoriesForTrends()
+		repos, _ := h.repositoriesForTrends()
 		trends, err := h.github.OrgTrends(ctx, h.org, repos, 6)
 		if err != nil {
 			return trackingTrendsResponse{}, err
@@ -31,15 +31,10 @@ func (h *Handler) TrackingTrends(w http.ResponseWriter, r *http.Request) {
 		out := trackingTrendsResponse{
 			Organization: trends.Organization,
 			Points:       trends.Points,
-			Partial:      trends.Partial || !reposFromCache,
+			Partial:      trends.Partial,
 		}
-		switch {
-		case trends.Partial && !reposFromCache:
-			out.Message = "Monthly PR and issue counts may be incomplete (GitHub search limits). Repository and star trends use the repo list loaded on this page."
-		case trends.Partial:
+		if trends.Partial {
 			out.Message = "Monthly PR and issue counts may be missing for some months due to GitHub search limits."
-		case !reposFromCache:
-			out.Message = "Repository and star trends use the repo list loaded on this page."
 		}
 		return out, nil
 	})

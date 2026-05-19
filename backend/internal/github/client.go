@@ -9,6 +9,7 @@ import (
 	"time"
 
 	gh "github.com/google/go-github/v69/github"
+	"github.com/shurcooL/githubv4"
 	"golang.org/x/oauth2"
 )
 
@@ -23,28 +24,37 @@ type Repository struct {
 	Stars       int    `json:"stargazers_count"`
 	Forks       int    `json:"forks_count"`
 	OpenIssues        int `json:"open_issues_count"`
-	OpenPullRequests  int `json:"open_pull_requests_count"`
-	Private           bool   `json:"private"`
+	OpenPullRequests int    `json:"open_pull_requests_count"`
+	LastReleaseAt    string `json:"last_release_at,omitempty"`
+	LastReleaseTag       string `json:"last_release_tag,omitempty"`
+	LastReleaseURL       string `json:"last_release_url,omitempty"`
+	Private              bool   `json:"private"`
 	Archived    bool   `json:"archived"`
 	CreatedAt   string `json:"created_at,omitempty"`
 	UpdatedAt   string `json:"updated_at,omitempty"`
 }
 
 type Client struct {
-	api         *gh.Client
+	api           *gh.Client
+	gql           *githubv4.Client
 	authenticated bool
 }
 
 func NewClient(token string) *Client {
 	token = strings.TrimSpace(token)
-	httpClient := &http.Client{Timeout: 30 * time.Second}
+	httpClient := &http.Client{Timeout: 60 * time.Second}
 	authenticated := token != ""
 	if authenticated {
 		ts := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
 		httpClient = oauth2.NewClient(context.Background(), ts)
 	}
+	var gql *githubv4.Client
+	if authenticated {
+		gql = githubv4.NewClient(httpClient)
+	}
 	return &Client{
 		api:           gh.NewClient(httpClient),
+		gql:           gql,
 		authenticated: authenticated,
 	}
 }
