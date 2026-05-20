@@ -193,7 +193,7 @@ export function RepositoryInsightPanel({ repo, refreshTrigger, onClose }: Reposi
     () =>
       safeCategories.map((c, i) => ({
         id: c.key,
-        label: c.label,
+        label: (location: string) => location === "tooltip" ? c.label : `${c.label} (${c.total})`,
         value: c.total,
         color: CHART_COLORS[i % CHART_COLORS.length],
       })),
