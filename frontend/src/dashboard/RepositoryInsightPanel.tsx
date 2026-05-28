@@ -186,10 +186,10 @@ export function RepositoryInsightPanel({ repo, refreshTrigger, onClose }: Reposi
   const hasIssueCategory = selected?.issues && selected.issues.length > 0;
 
   const filteredIssues = useMemo(() => {
-    if (!selected?.issues) return [];
-    if (!effectiveComplexityFilter) return selected.issues;
-    return selected.issues.filter(i => i.complexity === effectiveComplexityFilter);
-  }, [selected, effectiveComplexityFilter]);
+    if (!filteredSelected?.issues) return [];
+    if (!effectiveComplexityFilter) return filteredSelected.issues;
+    return filteredSelected.issues.filter(i => i.complexity === effectiveComplexityFilter);
+  }, [filteredSelected, effectiveComplexityFilter]);
 
   const pieData = useMemo(
     () =>
@@ -461,7 +461,7 @@ export function RepositoryInsightPanel({ repo, refreshTrigger, onClose }: Reposi
         <Box>
           <Stack direction="row" spacing={1} sx={{ alignItems: "center", mb: 1, flexWrap: "wrap" }}>
               <Typography variant="subtitle2">
-                {selected.label} ({effectiveComplexityFilter ? filteredIssues.length : selected.total})
+                {selected.label} ({effectiveComplexityFilter ? filteredIssues.length : filteredSelected.total})
               </Typography>
               {aiMode && hasIssueCategory && (
                 <>
